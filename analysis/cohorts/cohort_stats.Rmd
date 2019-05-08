@@ -1,0 +1,99 @@
+---
+title: "Cohort Statistics"
+author: "Marcus Badgeley"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+editor_options:
+  chunk_output_type: console
+params:
+  mutating: "binary"
+  filtering: "crossSectional"
+---
+
+# Objective
+Characterize a cohort table.  
+
+```{r config, include=F}
+library(knitr); library(pander); library(tibble); library(caret)
+devtools::load_all()
+
+knitr::opts_chunk$set(comment="#>",
+                      fig.show='hold', fig.align="center", fig.height=8, fig.width=8,
+                      message=FALSE,
+                      warning=FALSE, cache=FALSE, tidy=TRUE, rownames.print=FALSE)
+
+ggplot2::theme_set(vizR::theme_())
+
+set.seed(123)
+```
+
+
+Cohorts are designated by a mutation and a filter, with all combinations valid.  Mutations include binarization and imputation, which change the actual data values in the table.  Filtering subsets the patients from a cross sectional study design to different case control study designs.
+
+* mutation: `r params$mutating`. (available: `r lift_vd(str_x)("none", "binary", "complete")`)     
+* filter: `r params$filtering`.  (available: `r str_x(hipsOpt(cohorts))`) 
+
+```{r params_rmd, results="hide"}
+scalars <- hipsCohort_(params$mutating, params$filtering)
+
+# After params$filtering
+scalars[] %<>% map_if(.p = is.factor, .f = as.character)
+scalars
+```
+
+
+# Missing Data
+```{r missing_data, results="hide", fig.height=4}
+# Filtered Scalars
+DF.assess_missingness(scalars)
+ggMissing(scalars)
+```
+
+# Categorical Breakouts
+```{r univariates, results="asis"}
+# Identify categorical variables
+catVars_chr <- scalars %>%
+    keep(.p = ~class(.x) %in% c("factor", "character", "logical")) %>%
+    keep(.p = ~n_distinct(.x) < 20) %>%
+    names()
+
+# Generate a summary table for the full dataset and each categorical grouping
+walk(c(character(0), catVars_chr), ~print(Kable.cohort_df(x = scalars, grp = .x)))
+```
+
+# Continuous Breakouts
+```{r prep_continuous}
+DATA <- scalars
+COL <- "sex"
+ALPHA <- "fx"
+
+scale_alpha_fx <- scale_alpha_manual("Fracture", values = c("TRUE"=1, "FALSE"=0.5))
+
+# Identify continuous variables
+contVars_chr <- DATA %>%
+    keep(.p = is.numeric) %>%
+    names()
+```
+
+```{r view_univariates, eval = (length(contVars_chr) > 0), fig.height = 2 * length(contVars_chr) + 0.5, tidy=FALSE}
+# Melt table to tee up a facet_wrap by continuous variable
+DATA %>%
+    select(!!COL, !!ALPHA, one_of(contVars_chr)) %>%
+    gather(key = "contVar", value = "contVal", one_of(contVars_chr)) %>%
+    {
+        ggplot(data=., aes_string(x = "contVal", alpha = ALPHA, fill = COL)) +
+            geom_histogram(bins=15) +
+            scale_alpha_fx +
+            scale_fill_sex() +
+            facet_wrap(~contVar, ncol=2, scales = "free")
+    }
+```
+
+# Relationships between Fracture and Covariates
+```{r view_covar_ors}
+ggOddsRatios(scalars)
+```
+
+Codebase State: `r dotfileR::gitState()` on `r date()`

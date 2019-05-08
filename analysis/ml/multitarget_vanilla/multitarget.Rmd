@@ -1,0 +1,220 @@
+---
+title: "Model Evaluation"
+author: "Marcus Badgeley"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+    code_folding: show
+editor_options:
+    chunk_output_type: console
+---
+
+# Objective
+Evaluate a collection of models.
+
+```{r config, include=F}
+library(knitr); library(pander); library(tibble); library(caret)
+library(AnalysisToolkit); library(MyUtils)
+library(ggrepel)
+devtools::load_all()
+
+knitr::opts_chunk$set(comment="#>",
+                      fig.show='hold', fig.align="center", fig.height=8, fig.width=8,
+                      message=FALSE,
+                      warning=FALSE, cache=FALSE, rownames.print=FALSE)
+
+ggplot2::theme_set(vizR::theme_())
+
+set.seed(123)
+```
+
+
+## Load Models
+```{r load_models, comment=""}
+kDIR_MULTITARGET <- file.path(hips::Fp_ml_dir(), "multitarget_vanilla")
+
+FpMultitarget <- function(s_chr) {
+    MyUtils::fp_mostRecent(file.path(kDIR_MULTITARGET, s_chr), verbose = TRUE)
+}
+
+models <- readRDS(file = FpMultitarget("trained_models.rds"))
+load(FpMultitarget("test_cohort.Rdata"))
+
+target.info <- hipsInfo(targets)
+table(target.info$target_mode)
+```
+
+
+# Evaluation
+## Inference
+```{r eval_routines}
+# Model inference ----
+pY_lst <- map(models, predict_pY, newdata = test_df %>% unnest(pre))
+Y_lst <- map(names(models), ~test_df[[.x]])
+
+cCs <- pmap(list(pY_lst, Y_lst, names(models)),
+     ~ClassifierCurve(pY = ..1, Y = ..2, id = ..3))
+```
+
+
+# Tables
+## Performace Scores
+```{r extract_tbls}
+roc_tbl <- map(cCs, gg_data_roc)
+pretty_perf <- cCs %>% 
+    glance_pretty() %>% 
+    mapnames("Classifier", "target") %>% 
+    mutate(target = mapvalues(target, from = names(AES_TARGET_LABELS), to = unname(AES_TARGET_LABELS))) %>% 
+    arrange(desc(auc)) 
+
+pretty_perf %>% 
+    kable(caption = "Performance of pretrained image models on various targets.")
+
+Tbl(pretty_perf, bn = "SuppTable2_MultitargetPerf")
+```
+
+# Overal Perf Views
+```{r model_views}
+# Target learnability
+perf_tbl <- glance(cCs) %>% 
+    mapnames("Classifier", "target")
+
+
+# ROC by target
+DATA <- merge(x = target.info, y = perf_tbl, by = "target")
+
+# Craft plot data intermediate
+kFN_OUT_INT <- "roc_plt_data.rds"
+fp_out_int <- file.path(kDIR_MULTITARGET, kFN_OUT_INT)
+if (!file.exists(fp_out_int)) {
+    DATA %<>% arrange(desc(auc))
+    DATA$target %<>% fct_reorder(., DATA$auc)
+    multitarget_roc_ci_df <- DATA[, c("target", "target_mode", "auc", "auc_lower", "auc_upper", "is_sig")]
+    saveRDS(multitarget_roc_ci_df, fp_out_int)
+}
+
+
+gg_roc <- ggplot(DATA,
+                 aes(x = fct_reorder(target, auc),
+                     y = auc,
+                     ymin = auc_lower,
+                     ymax = auc_upper)) +
+    geom_errorbar(width = 0.25, position = Pd()) +
+    geom_point(position = Pd()) +
+    geom_text(aes(label = is_sig), nudge_x = 0.2)
+gg_roc <- gg_roc +
+    geom_hline(yintercept = 0.5, alpha = 0.5, linetype = 2) +
+    geom_hline(yintercept = 1, alpha = 0.5) +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_x_target() +
+    labs(y = "AUROC +/- 95% bootstrap CI") +
+    theme(strip.text.y = element_text(angle = 0),
+          axis.text.x = element_text(vjust = 0.5)) +
+    scale_y_continuous(breaks = c(0.5, 0.75, 1), labels = c(0.5, 0.75, 1)) +
+    theme(legend.position = "bottom", legend.direction = "vertical")
+GG_ROC <- gg_roc %+%
+    coord_flip() +
+    labs(title = "A pre-trained CNN has non-random performance\non every classification target attempted") +
+    theme(plot.title = element_text(hjust = 1))
+GG_ROC + aes(col = target_mode) + scale_color_targetMode()
+```
+
+
+```{r roc_pproc}
+# ROC PRROC
+XY_byClassifier <- purrr::map(cCs, gg_data_roc)
+XY_byGeom <- purrr::transpose(XY_byClassifier)
+xy_geoms <- purrr::map(XY_byGeom, purrr::lift_dl(dplyr::bind_rows, .id = "Classifier"))
+xy_geoms$lines$Classifier %<>% as_factor() %>% fct_relevel(DATA$target)
+
+gg_roc <- ggplot2::ggplot(xy_geoms$lines, ggplot2::aes(x=x, y=y, col = Classifier)) +
+    ggplot2::geom_line() +
+    ggplot2::geom_point(data = xy_geoms$points, shape=10, size = 3) +
+    ggplot2::geom_rug(data = xy_geoms$points) +
+    ggplot2::geom_text(data = xy_geoms$points, aes(label = is_sig), size = 5, nudge_y = 0.03, show.legend=FALSE) +
+    gg_style_roc
+
+XY_byGeom <- map(cCs, gg_data_prc) %>% transpose()
+xy_geoms <- map(XY_byGeom, lift_dl(bind_rows, .id="Classifier"))
+xy_geoms$lines$Classifier %<>% as_factor() %>% fct_relevel(DATA$target)
+
+gg_prc <- ggplot2::ggplot(xy_geoms$lines, ggplot2::aes(x=x, y=y, col=Classifier)) +
+    ggplot2::geom_line() +
+    ggplot2::geom_point(data = xy_geoms$points, shape=10, size = 3) +
+    ggplot2::geom_rug(data = xy_geoms$points) +
+    gg_style_prc
+
+
+gg_prc %<>% `+`(list(theme(legend.direction = "vertical", legend.position = "bottom")))
+
+gg_prc %<>% `+`(guides(color = guide_legend(title = "Classification Target", ncol = 2, title.hjust = 0.5)))
+leg <- cowplot::get_legend(gg_prc)
+gg_prc %<>% `+`(NL)
+gg_roc %<>% `+`(NL)
+
+GG <- cowplot::plot_grid(
+    cowplot::plot_grid(gg_roc, gg_prc, ncol = 2, align='hv'),
+    cowplot::plot_grid(NULL, leg, NULL, ncol = 3, rel_widths = c(1, .1, 1)),
+    ncol = 1, rel_heights = c(.6, 0.4))
+GG
+
+# cowplot::save_plot("analysis/figures/ROC_PRROC.png", GG, base_width = 4, base_height = 6)
+```
+
+
+#### Does sample size explain performance?
+```{r perf_by_N, fig.height=4}
+# ROC by Ntrain / Nlimiting
+library(cowplot)
+
+# extract sample sizes
+n_training_df <- map(models, train_n_eg) %>% 
+    lift_dl(bind_rows, .id = "target")()
+
+DATA <- merge(x = target.info, y = perf_tbl, by = "target")
+DATA <- merge(DATA, n_training_df, by= "target")
+DATA <- merge(DATA, AES_TARGET_LABELS %>% enframe(name = "target", "PrettyTarget"), by = "target")
+
+gg_nTrain <- DATA %>%
+{
+    ggplot(., aes(x = n_train, y = auc, col = target_mode)) +
+        geom_point() +
+        scale_color_targetMode() +
+        scale_x_continuous(labels = function(x) format(x, big.mark=",", scientific=FALSE)) +
+        labs(x = "Total No. Training Samples")
+}
+
+GG_TRAIN <- gg_nTrain +
+    geom_smooth(method = "lm", aes(group=1), se=FALSE, col = "#666666") +
+    geom_text_repel(aes(label = PrettyTarget), force = 15)
+
+
+gg_nLimiting <- DATA %>%
+{
+    ggplot(., aes(x = n_limiting, y = auc, col = target_mode)) +
+        geom_point() +
+        scale_color_targetMode() +
+        scale_x_continuous(labels = function(x) format(x, big.mark=",", scientific=FALSE)) +
+        labs(x = "Minor Class No. Training Samples", y = "AUROC")
+}
+GG_LIMIT <- gg_nLimiting +
+    geom_smooth(method = "lm", aes(group=1), se=FALSE, col = "#666666") +
+    geom_text_repel(aes(label = PrettyTarget), force = 15)
+    
+
+LEG <- cowplot::get_legend(GG_TRAIN)
+GG_TRAIN %<>% `+`(NL)
+GG_TRAIN %<>% `+`(theme(axis.title.y = element_blank(), axis.text.y = element_blank()))
+GG_LIMIT %<>% `+`(NL)
+
+GG <- plot_grid(GG_LIMIT, GG_TRAIN, LEG, nrow=1, rel_widths = c(1, 0.85, 0.3))
+GG
+
+cowplot::save_plot(filename = file.path(FS_hipsDir(), "analysis/figures/ROC_byN.tiff"), GG,
+                    base_width = 7, base_height = 5)
+```
+
+
+
+
+Codebase State: `r dotfileR::gitState()` on `r date()`

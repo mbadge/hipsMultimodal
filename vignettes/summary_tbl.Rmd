@@ -1,0 +1,226 @@
+---
+title: "Population Statistics"
+author: "Marcus Badgeley"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r config, include=F}
+library(knitr); library(pander); library(tibble); library(caret)
+devtools::load_all()
+
+knitr::opts_chunk$set(comment="#>",
+                      fig.show='hold', fig.align="center", fig.height=8, fig.width=8,
+                      message=FALSE,
+                      warning=FALSE, rownames.print=FALSE)
+
+ggplot2::theme_set(vizR::theme_())
+
+set.seed(123)
+```
+
+
+```{r pops}
+library(hips)
+msh <- hipsCohort()
+adl <- adlCohort()
+
+msh$rnd <- NULL
+msh$pre <- NULL
+
+# setdiff(names(msh), names(adl_test))
+adl_test[, setdiff(names(adl_test), names(msh))] <- NULL
+
+dat <- bind_rows("adl"=adl_test, "msh"=msh, .id = "Site")
+#! Adl data isn't having pt or radiographs counted correctly since I don't have these identifiers
+```
+
+# Matching routines
+```{r matched_vars}
+hipsInfo(caseControl_matchingVars) %>% 
+    knitr::kable()
+
+hipsInfo(caseControl_matchingVars) %>% 
+    Tbl(bn = "SuppTable8_caseControlMatchingVars")
+```
+
+# MSH cohorts
+```{r msh_only, results="markup"}
+data("caseControlCohorts", package = "hips")
+load(file.path(FS_hipsDir(), "analysis/ml/multimodal/cohorts.Rdata") %>% MyUtils::fp_mostRecent())
+
+ComplexSummary(msh)
+
+csTrain <- train_df$img
+csTest <- test_df$img
+# caseControlCohorts
+
+prtns <- list("cs_NA_train" = msh %>% filter(img %in% csTrain),
+              "cs_NA_test"  = msh %>% filter(img %in% csTest),
+              "cc_rnd_test" = msh %>% 
+                  filter(img %in% caseControlCohorts$rnd) %>% 
+                  filter(img %in% csTest),
+              "cc_dem_test" = msh %>% 
+                  filter(img %in% caseControlCohorts$balDem) %>% 
+                  filter(img %in% csTest),
+              "cc_pt_test" = msh %>% 
+                  filter(img %in% caseControlCohorts$balPt) %>% 
+                  filter(img %in% csTest),
+              "cc_all_test" = msh %>% 
+                  filter(img %in% caseControlCohorts$balAll) %>% 
+                  filter(img %in% csTest))
+
+msh_cohort_df <- prtns %>% 
+    map_dfr(ComplexSummary, .id = "Cohort") %>% 
+    tidyr::separate(Cohort, into = c("Sampling", "Matching", "Partition"), remove=FALSE) %>% 
+    mutate(Sampling = fct_recode(Sampling, "Cross-Sectional"="cs", "Case-Control"="cc")) %>% 
+    mutate(Matching = fct_recode(Matching, NULL="NA", "Random"="rnd", "AgeGender"="dem", "Pt"="pt", "PtHp"="all")) %>% 
+    AnalysisToolkit::t2idf()
+
+names(msh_cohort_df) <- c("Cohort", "cs-train", "cs-test", "cc-rnd-test", "cc-dem-test", "cc-pt-test", "cc-pthp-test")
+
+msh_cohort_df %>% 
+    knitr::kable()
+
+Tbl(msh_cohort_df, bn = "Table1_MshCohortCharacteristics")
+```
+
+## MSH by device
+```{r msh_by_dev}
+orig_tbl <- ComplexSummary(hipsCohort(), "device_model") %>%
+    select(-`No. scanners`, -`No. scanner manufacturers`) %>% 
+    mutate(device_model = as.character(device_model)) %>%   # to avoid coercion to integer column names
+    AnalysisToolkit::t2idf()
+    
+alt_tbl <- ComplexSummary(hipsCohort(), "device_model") %>%     
+    select(-`No. scanners`, -`No. scanner manufacturers`) %>% 
+    mutate(device_model = as.character(device_model))
+
+    
+names(orig_tbl)[1] <- "Scanner"
+names(alt_tbl)[1] <- "Scanner"
+orig_tbl %>% knitr::kable()
+alt_tbl %>% knitr::kable()
+
+Tbl(orig_tbl, bn = "SuppTable14_MshByScannerOrig")
+Tbl(alt_tbl, bn = "SuppTable14_MshByScannerAlt")
+```
+
+
+## MSH by department
+```{r msh_by_dept}
+tbl <- ComplexSummary(hipsCohort(), "dept") %>% 
+    select(-`No. scanners`, -`No. scanner manufacturers`) %>% 
+    mutate(dept = as.character(dept)) %>%   # to avoid coercion to integer column names
+    AnalysisToolkit::t2idf()
+
+tbl %<>% `[`(, c(1, 3, 4, 5, 2))
+names(tbl) <- c("Department", "Emergency Department", "Inpatient", "Outpatient", "(Missing)")
+
+tbl %>% knitr::kable()
+
+Tbl(tbl, bn = "SuppTable_MshByDept")
+```
+
+
+## MSH by fracture
+```{r msh_by_fx}
+tbl <- ComplexSummary(hipsCohort(), "fx") %>% 
+    select(-`Fracture frequency, No. (%)`) %>% 
+    AnalysisToolkit::t2idf()
+names(tbl)[1] <- "Fracture"
+tbl %>% knitr::kable()
+
+Tbl(tbl, bn = "SuppTable15_MshByFx")
+```
+
+
+# Adelaide Cohorts
+```{r adl_test_cohorts}
+adl_tests <- adlCohort()
+tbl <- bind_rows(adl_tests, .id = "Cohort")
+sum_tbl <- tbl %>% 
+    mutate(sex = map_lgl(sex, `==`, "F")) %>%   # recode gender
+    group_by(Cohort) %>% 
+    summarise(img_n = n(),
+              fx_sum = sum_(fx),
+              fx_prev = mean_(fx) * 100,
+              age_mean = mean_(age),
+              age_sd = sd_(age),
+              f_sum = sum_(sex),
+              f_prev = mean_(sex) * 100,
+              dev_mod_n = n_distinct(device_model),
+              dev_brand_n = n_distinct(device_brand)
+              ) %>% 
+    arrange(desc(img_n)) %>%  # Arrange while still numeric (before PrettyEach())
+    PrettyEach() %>% 
+    mutate(age_cmpd = map2_chr(age_mean, age_sd, ~glue("{.x} ({.y})"))) %>%
+    select(-age_mean, -age_sd) %>%
+    mutate(fx_cmpd = map2_chr(fx_sum, fx_prev, ~glue("{.x} ({.y})"))) %>%
+    select(-fx_sum, -fx_prev) %>% 
+    mutate(f_cmpd = map2_chr(f_sum, f_prev, ~glue("{.x} ({.y})"))) %>%
+    select(-f_sum, -f_prev)
+
+# sum_tbl
+sum_tbl$Sampling <- c("Cross-Sectional", "Case-Control", "Case-Control", "Case-Control")
+sum_tbl$Partition <- rep_len("Test", 4)
+sum_tbl$Matching <- c("NA", "PT+HP", "PT", "Random")
+
+# sum_tbl
+sum_tbl %<>% select(Cohort, Sampling, Matching, Partition, img_n, dev_mod_n, dev_brand_n, age_cmpd, fx_cmpd, f_cmpd)
+# sum_tbl
+
+names(sum_tbl)[5:10] <- c("No. radiographs", 
+                          "No. scanners",
+                          "No. scanner manufacturers",
+                          "Age, mean (SD), years",
+                          "Fracture frequency, No. (%)",
+                          "Female frequency, No. (%)")
+
+sum_tbl %<>% AnalysisToolkit::t2idf()
+
+sum_tbl %>% 
+    knitr::kable()
+
+Tbl(sum_tbl, "SuppTable9_AdlCohortCharacteristicsByCohort")
+```
+
+```{r imp_bmi}
+bmi_df <- read_csv(file.path(FS_hipsDir(), "analysis/cohorts/imputeBmiStats.csv"))
+
+bmi_df$predictor_sets %<>% firstLower()
+bmi_df$predictor_sets %<>% PrettyPredictors()
+
+names(bmi_df) <- c("Predictor Set", "Imputed HP variables", "RMSE", "$R^2$", "RMSE SD", "$R^2 SD$")
+
+bmi_df %>% 
+    knitr::kable()
+
+Tbl(bmi_df, bn = "SuppTable16_bmiImputePerf")
+```
+
+
+```{r dev_dept, fig.height=4}
+msh <- hipsCohort()
+msh %<>% discard(.p = is.list)
+
+msh$device_model %<>% mapvalues(from = names(hips:::AES_DEVICE_LABELS), to = unname(hips:::AES_DEVICE_LABELS))
+msh$device_model %<>% fct_infreq()
+
+msh$dept %<>% PrettyDept()
+msh$dept %<>% as_factor() %>% fct_explicit_na()
+msh$dept %<>% fct_relabel(.fun = partial(str_replace, pattern = "\\s", replacement = "\n"))
+
+gg <- ggplot(msh, aes(x = dept, y = device_model)) +
+    geom_count() +
+    labs(x = "Department", y = "Scanner Model", size = "N radiographs")
+gg
+ggsave(filename = "dept_vs_device.png", plot = gg, height = 4, width = 8)
+```
+
+
+Codebase State: `r dotfileR::gitState()` on `r date()`

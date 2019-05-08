@@ -1,0 +1,118 @@
+---
+title: "Predict PC1"
+author: "Marcus Badgeley"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+    code_folding: show
+editor_options:
+    chunk_output_type: console
+---
+
+# Objective
+Determine which covariates are most indicative of the image pixels' principle component representation.
+
+```{r config, include=F}
+library(knitr); library(pander); library(tibble); library(caret)
+library(AnalysisToolkit)
+devtools::load_all()
+
+knitr::opts_chunk$set(comment="#>",
+                      fig.show='hold', fig.align="center", fig.height=8, fig.width=8,
+                      message=FALSE,
+                      warning=FALSE, cache=FALSE, rownames.print=FALSE)
+
+ggplot2::theme_set(vizR::theme_())
+
+set.seed(123)
+```
+
+# Data
+```{r data_in}
+library(hips)
+cohort_df <- hipsCohort()
+cohort_df %<>% select(-rnd) %>% unnest(pre)
+#ComplexSummary(cohort_df) %>% as.data.frame %>% Kable()
+Kable.cohort_df(cohort_df)
+
+kUSE_CACHE <- TRUE
+```
+
+
+# Methods
+Train regression model `PC1 ~ device_brand`
+```{r train_lms, eval = !kUSE_CACHE}
+DATA <- cohort_df %>% drop_na(PC1, device_brand)
+mod <- caret::train(PC1 ~ device_brand, DATA, method="lm")
+
+ggplot(DATA, aes(x = PC1, fill = device_brand)) + geom_histogram(position = "fill")
+```
+
+Train regression model `PC1 ~ VAR`
+```{r train_lms_var, eval = !kUSE_CACHE}
+Y_VAR <- "PC1"
+X_VAR <- "device_model"
+DATA <- cohort_df %>% drop_na(!!Y_VAR, !!X_VAR)
+mod <- caret::train(x = DATA[, X_VAR],
+                    y = DATA[[Y_VAR]],
+                    method="lm")
+
+ggplot(DATA, aes_string(x = Y_VAR, fill = X_VAR)) + geom_histogram(position = "fill")
+```
+
+
+```{r all_pairs, eval = !kUSE_CACHE}
+Y_VARS <- str_c("PC", 1:10)
+X_VARS <- hipsInfo(predictor_sets)$ptHp
+xy_df <- expand.grid(X_VARS, Y_VARS, stringsAsFactors = FALSE)
+
+trainLm <- function(x, y) {
+    DATA <- cohort_df %>% drop_na(!!y, !!x)
+    caret::train(x = DATA[, x],
+                    y = DATA[[y]],
+                    method="lm")
+}
+
+lm_mods <- map2(xy_df$Var1, xy_df$Var2, trainLm)
+rqsds <- map_dbl(lm_mods, c("results", "Rsquared"))
+xy_df$Fill <- rqsds
+
+var1_sort <- xy_df %>% filter(Var2=="PC1") %>% arrange(desc(Fill)) %$% Var1
+xy_df$Var1 %<>% as.factor() %>% fct_relevel(var1_sort)
+
+save(xy_df, file = file.path(FS_hipsDir(), "cache", "predict_pcs.xy_df.Rdata"))
+```
+
+# View results
+```{r view_res}
+load(file.path(FS_hipsDir(), "cache", "predict_pcs.xy_df.Rdata"))
+
+xy_df$Var2 %<>% as.factor() %>% fct_relevel(str_c("PC", 1:10))
+gg <- ggplot(xy_df, aes(x = Var2, y = Var1, fill = Fill)) +
+    geom_raster() +
+    scale_y_target(title = "Explanatory Variable") +
+    scale_fill_viridis_c() +
+    scale_x_discrete(labels = c(1:10)) +
+    labs(x = "Image Principal Component",
+         fill = expression(R^2))
+gg
+cowplot::ggsave(file.path(FS_hipsDir(), "analysis", "ml", "predict_pcs", "predict_pcs.png"), gg, width = 6, height=6, dpi = 300)
+
+corr_df <- xy_df %>% arrange(desc(Fill)) %>% group_by(Var2) %>% filter(Fill == max(Fill)) %>% arrange(Var2)
+corr_df$Fill %<>% round(digits = 2)
+
+PrettyTargets <- function(x) mapvalues(x,
+                                       from = names(AES_TARGET_LABELS),
+                                       to = unname(AES_TARGET_LABELS))
+corr_df$Var1 %<>% PrettyTargets()
+
+names(corr_df) <- c("Explanatory Covariate", "Image Component", "$R^2$")
+
+Tbl(corr_df, bn = "SuppTable1_BtlnckCovarPredictors")
+
+corr_df %>% 
+    Tbl(bn = "SuppTable1_BtlnckCovarPredictors", tbl_type = "html")
+
+corr_df %>% 
+    kable(caption = "Strongest predictor for each image principal component.")
+```

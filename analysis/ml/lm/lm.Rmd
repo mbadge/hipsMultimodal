@@ -1,0 +1,101 @@
+---
+title: "LM Model Exploration"
+author: "Marcus Badgeley"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+    code_folding: show
+editor_options:
+    chunk_output_type: console
+---
+
+# Objective
+Train linear regression models on continuous variables.
+
+```{r config, include=F}
+library(knitr); library(pander); library(tibble); library(caret)
+library(AnalysisToolkit)
+devtools::load_all()
+
+knitr::opts_chunk$set(comment="#>",
+                      fig.show='hold', fig.align="center", fig.height=8, fig.width=8,
+                      message=FALSE,
+                      warning=FALSE, cache=FALSE, rownames.print=FALSE)
+
+ggplot2::theme_set(vizR::theme_())
+
+set.seed(123)
+```
+
+```{r pilot_lm, fig.show='hide'}
+# Pkg Data
+scalars_base <- hipsCohort()
+
+# Continuous Vars
+vars_cont <- scalars_base %>% map_lgl(is.numeric) %>% which %>% names %>% set_names
+
+# Train models
+inf_tbl_lst <- map(vars_cont, ~trainTestLm(scalars_base, target = .x, predictor_set = "img"))
+
+# Remove dT values > 1d
+inf_tbl_lst$dT.exam_to_final <- inf_tbl_lst$dT.exam_to_final %>% filter(Y < 24*60)
+inf_tbl_lst$dT.exam_to_prelim <- inf_tbl_lst$dT.exam_to_prelim %>% filter(Y < 24*60)
+inf_tbl_lst$dT.exam_to_final <- inf_tbl_lst$dT.exam_to_final %>% filter(Y < 24*60)
+
+
+# compute r-squared values
+rsq <- function(x, y) cor(x, y) ^2
+rsqd_tbl <- inf_tbl_lst %>% 
+    map_dbl(~rsq(.$Y, .$Y_)) %>% 
+    tibble::enframe(name = "target", value = "r2") %>% 
+    arrange(desc(r2))
+
+rsqd_tbl$target %<>% hips::PrettyTargets()
+names(rsqd_tbl) <- c("Target", "$R^2$")
+
+rsqd_tbl %>% 
+    knitr::kable()
+
+Tbl(rsqd_tbl, bn = "SuppTable3_MultitargetRegressionR2")
+```
+
+```{r views, include=FALSE}
+# Pilot
+DATA <- inf_tbl_lst[[1]]
+TARGET <- names(inf_tbl_lst)[[1]]
+
+ga <- ggplot(DATA, aes(x=Y_, y=Y)) +
+    geom_point() +
+    geom_smooth(se = FALSE) +
+    labs(x = paste("Predicted", str_case_title(TARGET)),
+         y = paste("Actual", str_case_title(TARGET)))
+
+gb <- ggplot(DATA, aes(x=Y_, y=Y)) +
+    geom_point() +
+    geom_smooth(se = FALSE, method="lm") +
+    labs(x = paste("Predicted", str_case_title(TARGET)),
+         y = paste("Actual", str_case_title(TARGET)))
+
+cowplot::plot_grid(ga, gb, ncol=2)
+```
+
+```{r multi_view}
+dbl_fit <- function(inference_df, target) {
+    ga <- ggplot(inference_df, aes(x=Y_, y=Y)) +
+        geom_point() +
+        geom_smooth(se = FALSE) +
+        labs(x = paste("Predicted", str_case_title(target)),
+             y = paste("Actual", str_case_title(target)))
+    
+    gb <- ggplot(inference_df, aes(x=Y_, y=Y)) +
+        geom_point() +
+        geom_smooth(se = FALSE, method="lm") +
+        labs(x = paste("Predicted", str_case_title(target)),
+             y = paste("Actual", str_case_title(target)))
+    
+    g <- cowplot::plot_grid(ga, gb, ncol=2)
+    print(g)
+}
+
+iwalk(inf_tbl_lst, dbl_fit)
+```

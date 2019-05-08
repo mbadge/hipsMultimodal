@@ -1,0 +1,27 @@
+Package: hips
+Title: Analysis of MSH Hip Data
+Version: 0.0.0.9000
+Authors@R: person("Marcus", "Badgeley", email = "mabadgeley@gmail.com", role = c("aut", "cre"))
+Description: Analysis of MSH Hip Data
+Depends: R (>= 3.4.2)
+Imports: ggplot2, dplyr, caret, purrr
+License: GPL-2
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 6.1.1
+Suggests: testthat
+Collate: 
+    'ComplexSummary.R'
+    'Eval.R'
+    'OddsRatios.R'
+    'zzz.R'
+    'Table.R'
+    'Train.R'
+    'aaa.R'
+    'checks.R'
+    'cohort_df.R'
+    'gg_aes.R'
+    'gg_views.R'
+    'hips-package.R'
+    'radiographs.R'
+    'stats_roc.R'

@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+*.Rproj
+inst/push_views/push_views
+*.txt
+*.npy
+*.eps

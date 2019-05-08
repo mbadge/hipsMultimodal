@@ -1,0 +1,323 @@
+---
+title: "Model Evaluation"
+author: "Marcus Badgeley"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+    code_folding: show
+editor_options:
+    chunk_output_type: console
+---
+
+# Objective
+Evaluate the correlation between models with different predictor sets and the consequences of naively combining evidence sets (assuming independence).
+
+```{r config, include=F}
+library(knitr); library(pander); library(tibble); library(caret)
+library(AnalysisToolkit); library(MyUtils)
+devtools::load_all()
+library(forcats)
+library("klaR")
+
+knitr::opts_chunk$set(comment="#>",
+                      fig.show='hold', fig.align="center", fig.height=8, fig.width=8,
+                      message=FALSE,
+                      warning=FALSE, cache=TRUE, rownames.print=FALSE)
+
+options(knitr.table.format = "html")  # Needed for interactive kableExtra styling
+
+ggplot2::theme_set(vizR::theme_())
+
+set.seed(123)
+```
+
+
+```{r aesthetic_defs, include=FALSE}
+library(RColorBrewer)
+RColorBrewer::display.brewer.all()
+Greys <- RColorBrewer::brewer.pal(n = 9, "Greys") %>% rev()
+Greys %>% pal_col
+Purples <- RColorBrewer::brewer.pal(n = 9, "Purples") %>% rev()
+Purples %>% pal_col
+Blues <- RColorBrewer::brewer.pal(n = 9, "Blues") %>% rev()
+Blues %>% pal_col
+Oranges <- RColorBrewer::brewer.pal(n = 9, "Oranges") %>% rev()
+Oranges %>% pal_col
+
+AES_COL <- c(
+    "ptHp" = Blues[5],
+    "nb_imgPtHp" = Blues[3],
+    "imgPtHp" = Blues[1],
+    "pt" = Oranges[7],
+    "nb_imgPt" = Oranges[4],
+    "imgPt" = Oranges[1],
+    "img" = Greys[7]
+)
+AES_LAB <- c(
+    "ptHp" = "PT + HP",
+    "nb_imgPtHp" = "Naive Bayes: IMG + PT + HP",
+    "pt" = "PT",
+    "nb_imgPt" = "Naive Bayes: IMG + PT",
+    "imgPtHp" = "Multimodal: IMG + PT + HP",
+    "imgPt" = "Multimodal: IMG + PT",
+    "img" = "IMG"
+)
+scale_color_pred <- function(title = "Fracture Model", values = AES_COL, labels = AES_LAB) {
+    ggplot2::scale_color_manual(title, values=values, labels=labels)
+}
+```
+
+# Evaluate Primary Models
+```{r load_primary, comment = ""}
+FpInRecent <- function(fn) {
+    par_dir <- Fp_ml_dir("multimodal")
+    fp_base <- file.path(par_dir, fn)
+    fp_mostRecent(fp_base)
+}
+models <- readRDS(file = FpInRecent("trained_models.rds"))
+#names(models) <- c("dem", "image", "mmDem")
+load(FpInRecent("cohorts.Rdata"))
+```
+
+
+```{r inference}
+models <- models[c("img", "pt", "ptHp", "imgPt", "imgPtHp")]
+
+# Collect probas from all models for train data
+train_pY_df <- map_dfc(models, predict_pY, newdata=train_df) 
+train_pY_df$fx <- train_df$fx
+
+# Collect probas for test df
+pY_df <- map_dfc(models, predict_pY, newdata=test_df)
+pY_df$fx <- test_df$fx
+
+cCs <- map(dplyr::select(pY_df, img:imgPtHp), ClassifierCurve, Y = pY_df$fx)
+cCs %>% gg_perf() + scale_color_pred()
+cCs %>% map(glance) %>% bind_rows(.id = "Classifier") %>%
+    knitr::kable(caption = "Performance of Primary Fracture Models.") %>%
+    kableExtra::kable_styling(bootstrap_options = c("condensed", "hover", "striped"), full_width = FALSE)
+```
+
+## Correlation between primary model predictions
+```{r check_primary_corrs}
+pY_df %>%
+    dplyr::select(img:imgPtHp) %>% 
+    PerformanceAnalytics::chart.Correlation()
+```
+
+
+# Further split data and train secondary ensemble model
+Naive Bayes assumes independence between inputs
+```{r ensemblers}
+# Make another stratification for ensembler train/eval
+nb_imgPtHp <- train(x = train_pY_df[, c("ptHp", "img")],
+            y = as.factor(train_pY_df[["fx"]]), method = 'nb',
+      trControl = trainControl(method = 'cv', number = 10))
+pY_df$nb_imgPtHp <- predict_pY(nb_imgPtHp, newdata = pY_df)
+
+
+nb_imgPt <- train(x = train_pY_df[, c("pt", "img")],
+            y = as.factor(train_pY_df[["fx"]]), method = 'nb',
+      trControl = trainControl(method = 'cv', number = 10))
+pY_df$nb_imgPt <- predict_pY(nb_imgPt, newdata = pY_df)
+
+#ensemble_test$nb_ehr <- predict_pY(nb_ehr, newdata = ensemble_test)
+cCs <- pY_df %>%
+    dplyr::select(pt:imgPtHp, starts_with("nb")) %>%
+    map(ClassifierCurve, Y = pY_df$fx)
+```
+
+# Tables
+```{r eval_ensemblers, results="markup"}
+pretty_perf <- cCs %>%
+    glance_pretty()
+
+pretty_perf %>% 
+    knitr::kable(caption = "Performance of Primary and Secondary Fracture Models.") %>%
+    kableExtra::kable_styling(bootstrap_options = c("condensed", "hover", "striped"), full_width = FALSE) %>%
+    kableExtra::group_rows("Primary Models", 1, 4) %>%
+    kableExtra::group_rows("Secondary/Ensemble Models", 5, 6)
+
+Tbl(pretty_perf, bn = "SuppTable12_BayesPerf")
+
+pretty_perf %>% 
+    knitr::kable(caption = "Performance of Primary and Secondary Fracture Models.") %>%
+    kableExtra::kable_styling(bootstrap_options = c("condensed", "hover", "striped"), full_width = FALSE) %>%
+    kableExtra::group_rows("Primary Models", 1, 4) %>%
+    kableExtra::group_rows("Secondary/Ensemble Models", 5, 6) %>% 
+    Tbl(bn = "SuppTable12_BayesPerf", tbl_type = "html")
+
+
+comp_tbl <- cCs %>%
+    hips::compare_cCs(pilot = FALSE) 
+
+comp_tbl %<>%
+    map_df( ~.x[c("statistic", "p.value", "method")], .id = "cC_pair") %>%
+    tidyr::extract("cC_pair", c("cC1", "cC2"), "(\\w+)-(\\w+)") %>% 
+    filter(substr(cC1, start = nchar(cC1)-1, stop=nchar(cC1)) == substr(cC2, start=nchar(cC2)-1, stop=nchar(cC2)))
+
+comp_tbl %>% 
+    mutate(p.value = ifelse(p.value < 0.05,
+                         yes = kableExtra::cell_spec(p.value, color = "green", bold = TRUE),
+                         kableExtra::cell_spec(p.value, color = "red", bold = FALSE))) %>%
+    mutate(p.value = str_replace(p.value, "([0-9]\\.[0-9]{3})[0-9]+", "\\1")) %>% 
+    mutate(p.value = str_replace(p.value, "([0-9])\\.[0-9]{3}e", "\\1e")) %>%
+    dplyr::select("Classifier 1" = cC1, "Classifier 2" = cC2, "DeLong's Test p-value"=p.value, "z statistic"=statistic) %>% 
+    knitr::kable(format = "markdown", caption = "Comparing Primary and Secondary Fracture Models.") %>%
+    kableExtra::kable_styling(bootstrap_options = c("condensed", "hover", "striped"), full_width = FALSE)
+
+
+comp_tbl %>% 
+    mutate(p.value = str_replace(p.value, "([0-9]\\.[0-9]{3})[0-9]+", "\\1")) %>% 
+    mutate(p.value = str_replace(p.value, "([0-9])\\.[0-9]{3}e", "\\1e")) %>%
+    dplyr::select("Classifier 1" = cC1, "Classifier 2" = cC2, "DeLong's Test p-value"=p.value, "z statistic"=statistic) %>%
+    Tbl(bn = "SuppTable13_BayesComp")
+
+comp_tbl %>% 
+    mutate(p.value = ifelse(p.value < 0.05,
+                         yes = kableExtra::cell_spec(p.value, color = "green", bold = TRUE),
+                         kableExtra::cell_spec(p.value, color = "red", bold = FALSE))) %>%
+    mutate(p.value = str_replace(p.value, "([0-9]\\.[0-9]{3})[0-9]+", "\\1")) %>% 
+    mutate(p.value = str_replace(p.value, "([0-9])\\.[0-9]{3}e", "\\1e")) %>%
+    dplyr::select("Classifier 1" = cC1, "Classifier 2" = cC2, "DeLong's Test p-value"=p.value) %>% 
+    knitr::kable(format = "html", escape = FALSE, caption = "Comparing Primary and Secondary Fracture Models.") %>%
+    kableExtra::kable_styling(bootstrap_options = c("condensed", "hover", "striped"), full_width = FALSE) %>% 
+    Tbl(bn = "SuppTable13_BayesComp", tbl_type = "html")
+```
+
+
+```{r view_ensemblers, fig.height = 4}
+roc_tbl <- map(cCs, gg_data_roc)
+
+cCs %>% 
+    map(AnalysisToolkit::cC2roc) %>% 
+    map(pROC::ci.auc)
+
+
+perf_tbl <- map(cCs, glance) %>%
+    lift_dl(bind_rows, .id = "model_id")()
+
+DATA <- perf_tbl
+DATA %<>% arrange(desc(auc))
+
+
+gg_roc <- ggplot(DATA,
+                 aes(x = fct_reorder(model_id, auc),
+                     y = auc,
+                     ymin = auc_lower,
+                     ymax = auc_upper,
+                     col = model_id)) +
+    geom_errorbar(width = 0.25, position = Pd()) +
+    geom_point(position = Pd())
+gg_roc <- gg_roc +
+    geom_hline(yintercept = 0.5, alpha = 0.5, linetype = 2) +
+    geom_hline(yintercept = 1, alpha = 0.5) +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_x_target() +
+    labs(y = "AUROC +/- 95% bootstrap CI") +
+    theme(strip.text.y = element_text(angle = 0),
+          axis.text.x = element_text(vjust = 0.5)) +
+    scale_y_continuous(breaks = c(0.5, 0.75, 1), labels = c(0.5, 0.75, 1), expand = c(0, 0)) +
+    theme(legend.position = "bottom", legend.direction = "vertical")
+GG_ROC <- gg_roc %+%
+    coord_flip() +
+    labs(title = "Ensemblers add no benefit to primary models.") +
+    theme(plot.title = element_text(hjust = 1)) +
+    scale_color_pred()
+
+GG_ROC
+```
+
+```{r roc_pproc}
+scale_args <- list(breaks = c(0, 0.5, 1),
+                   labels = c("0", ".5", "1"))
+gg_style_roc <- list(
+    ggplot2::geom_abline(alpha=0.3),
+    ggplot2::labs(title="ROC Curve", x = '1-Specificity', y = 'Sensitivity'),
+    purrr::lift_dl(scale_x_continuous)(scale_args),
+    purrr::lift_dl(scale_y_continuous)(scale_args)
+)
+gg_style_prc <- list(
+    ggplot2::labs(title="Precision-Recall\nCurve", x = 'Sensitivity', y = 'Positive\nPredictive Value'),
+    purrr::lift_dl(scale_x_continuous)(scale_args),
+    purrr::lift_dl(scale_y_continuous)(scale_args)
+)
+
+# ROC PRROC
+XY_byClassifier <- purrr::map(cCs, gg_data_roc)
+XY_byGeom <- purrr::transpose(XY_byClassifier)
+xy_geoms <- purrr::map(XY_byGeom, purrr::lift_dl(dplyr::bind_rows, .id = "Classifier"))
+xy_geoms$lines$Classifier %<>% as_factor() %>% fct_relevel(DATA$model_id)  # To order legend
+
+gg_roc <- ggplot2::ggplot(xy_geoms$lines, ggplot2::aes(x=x, y=y, col = Classifier)) +
+    ggplot2::geom_line() +
+    ggplot2::geom_point(data = xy_geoms$points, shape=10, size = 3) +
+    ggplot2::geom_rug(data = xy_geoms$points) +
+    coord_cartesian(xlim = c(0, 1), ylim=c(0, 1), expand=FALSE) +
+    gg_style_roc +
+    scale_color_pred()
+
+XY_byGeom <- map(cCs, gg_data_prc) %>% transpose()
+xy_geoms <- map(XY_byGeom, lift_dl(bind_rows, .id="Classifier"))
+xy_geoms$lines$Classifier %<>% as_factor() %>% fct_relevel(DATA$model_id)
+
+
+gg_prc <- ggplot2::ggplot(xy_geoms$lines, ggplot2::aes(x=x, y=y, col=Classifier)) +
+    ggplot2::geom_line() +
+    ggplot2::geom_point(data = xy_geoms$points, shape=10, size = 3) +
+    ggplot2::geom_rug(data = xy_geoms$points) +
+    gg_style_prc +
+    coord_cartesian(xlim = c(0, 1), ylim=c(0, 1), expand=FALSE) +
+    scale_color_pred()
+
+
+gg_prc %<>% `+`(list(theme(legend.direction = "vertical", legend.position = "bottom")))
+
+gg_prc %<>% `+`(guides(color = guide_legend(title = "Classification Model", ncol = 2, title.hjust = 0.5, label.hjust = 0)))
+leg <- cowplot::get_legend(gg_prc)
+gg_prc %<>% `+`(NL)
+gg_roc %<>% `+`(NL)
+
+GG <- cowplot::plot_grid(
+    cowplot::plot_grid(gg_roc, gg_prc, ncol = 2, align='hv'),
+    cowplot::plot_grid(NULL, leg, NULL, ncol = 3, rel_widths = c(1, .1, 1)),
+    ncol = 1, rel_heights = c(.6, 0.4))
+GG
+```
+
+```{r panel}
+GG_ROC %<>% `+`(theme(legend.position = "none"))
+GG_ROC %<>% `+`(theme(axis.ticks.y = element_blank()))
+GG_ROC %<>% `+`(theme(axis.title.y = element_blank()))
+GG_ROC %<>% `+`(theme(axis.text.y = element_blank()))
+GG_ROC %<>% `+`(theme(plot.title = element_blank()))
+gg_roc %<>% `+`(theme(plot.title = element_blank()))
+gg_prc %<>% `+`(theme(plot.title = element_blank()))
+
+# PANEL <- cowplot::plot_grid(
+#     cowplot::plot_grid(gg_roc, gg_prc, ncol = 2, align = 'hv'),
+#     cowplot::plot_grid(GG_ROC, NULL, leg, ncol = 3, rel_widths = c(0.4, 0.1, 0.5)),
+#     ncol = 1, rel_heights = c(0.6, 0.4)
+# )
+# PANEL
+fp_schematic <- Fp_ml_dir("bayes", "schematic_A_2.png")
+A <- cowplot::ggdraw() + cowplot::draw_image(fp_schematic)
+
+#RP <- cowplot::plot_grid(A, gg_roc, gg_prc, ncol=3, align = 'vh', axis = 'l', labels = c("a", "b", "c"), rel_widths = c(1, 0.8, 0.8))
+RP <- cowplot::plot_grid(A, gg_roc, gg_prc, ncol=3, axis = 'l', labels = c("a", "b", "c"), rel_widths = c(1, 0.8, 0.8))
+SL <- cowplot::plot_grid(NULL, GG_ROC, leg, ncol=3, labels = c("d", NULL, NULL), rel_widths = c(0.05, 0.75, 1))
+
+PANEL2 <- cowplot::plot_grid(RP, SL, ncol=1, align = 'vh', rel_heights = c(1, 0.6))
+PANEL2
+# cowplot::plot_grid(RP, SL, ncol = 2, rel_widths = c(0.5, 1), labels = c("A", NULL))
+
+#cowplot::save_plot(file.path(Fp_ml_dir(), "bayes", "fig4_2.png"), plot = PANEL2, base_width = 8.5)
+#cowplot::save_plot(file.path(Fp_ml_dir(), "bayes", "fig4.tiff"), plot = PANEL2, base_width = 8.5)
+# cowplot::save_plot(file.path(Fp_ml_dir(), "bayes", "fig4.svg"), plot = PANEL2, base_width = 8.5)
+cowplot::save_plot(file.path(Fp_ml_dir(), "bayes", "fig4.pdf"), plot = PANEL2, base_width = 8.5)
+
+#! make lower resolution
+#! http://mts-npjdigitalmed.nature.com/cgi-bin/main.plex?form_type=display_auth_instructions
+#cowplot::save_plot(file.path(Fp_ml_dir(), "bayes", "fig4_150.tiff"), plot = PANEL2, base_width = 8.5, dpi = 150)
+#cowplot::save_plot(file.path(Fp_ml_dir(), "bayes", "fig4_75.tiff"), plot = PANEL2, base_width = 8.5, dpi = 75)
+```
